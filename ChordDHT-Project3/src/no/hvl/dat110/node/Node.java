@@ -13,6 +13,7 @@ import java.math.BigInteger;
 //import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.rmi.AccessException;
+import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
@@ -312,118 +313,184 @@ public class Node extends UnicastRemoteObject implements ChordNodeInterface {
 
         // the same as MutexProcess - see MutexProcess
 
-        return false;
-    }
+        ArrayList<Message> replicas = new ArrayList<>(activenodesforfile);
+        replicas.remove(message);                                        // don't repeat the operation for the initiating process
 
-    @Override
-    public Message onMessageReceived(Message message) throws RemoteException {
+        // randomize - shuffle list each time - to get random processes each time
+        Collections.shuffle(replicas);
 
-        // increment the local clock
+        // multicast message to N/2 + 1 processes (random processes) - block until feedback is received
+        int qourom = replicas.size() / 2 + 1;
+        for (Message activenodes : replicas) {
+            String nodeip = activenodes.getNodeIP();
+            String nodeid = activenodes.getNodeID().toString();
+            try {
+                Registry registry = Util.locateRegistry(nodeip);        // locate the registry and see if the node is still active
+                ChordNodeInterface node = (ChordNodeInterface) registry.lookup(nodeid);
 
-        // Hint: for all 3 cases, use Message to send GRANT or DENY. e.g. message.setAcknowledgement(true) = GRANT
+                Message reply = node.onMessageReceived(message);
+                queueACK.add(reply);
+            } catch (NotBoundException e) {
+                //e.printStackTrace();
+            }
 
-        /**
-         *  case 1: Receiver is not accessing shared resource and does not want to: GRANT, acquirelock and reply
-         */
+            // do something with the acknowledgement you received from the voters - Idea: use the queueACK to collect GRANT/DENY messages and make sure queueACK is synchronized!!!
 
-        if (!CS_BUSY && !WANTS_TO_ENTER_CS) {
-            Message reply = new Message();
-            reply.setClock(this.counter);
-            reply.setProcessStubName(this.procStubname);
-            reply.setAcknowledged(true);
+            // compute election result - Idea call majorityAcknowledged()
+            boolean result = majorityAcknowledged();
 
-            acquireLock();
-
-            return reply;
+            return result;  // change to the election result
         }
 
-        /**
-         *  case 2: Receiver already has access to the resource: DENY and reply
-         */
+        @Override
+        public Message onMessageReceived (Message message) throws RemoteException {
 
-        if (CS_BUSY) {
-            Message reply = new Message();
-            reply.setClock(this.counter);
-            reply.setProcessStubName(this.procStubname);
-            reply.setAcknowledged(false);
+            // increment the local clock
 
-            return reply;
-        }
 
-        /**
-         *  case 3: Receiver wants to access resource but is yet to (compare own multicast message to received message
-         *  the message with lower timestamp wins) - GRANT if received is lower, acquirelock and reply
-         */
+            // Hint: for all 3 cases, use Message to send GRANT or DENY. e.g. message.setAcknowledgement(true) = GRANT
 
-        if (WANTS_TO_ENTER_CS) {
-            Message reply = new Message();
-            reply.setClock(this.counter);
-            reply.setProcessStubName(this.procStubname);
+            /**
+             *  case 1: Receiver is not accessing shared resource and does not want to: GRANT, acquirelock and reply
+             */
 
-            if (reply.getClock() < message.getClock()) {
-                reply.setAcknowledged(false);
-
-                return reply;
-            } else {
+            if (!CS_BUSY && !WANTS_TO_ENTER_CS) {
+                Message reply = new Message();
+                reply.setClock(this.counter);
+                reply.setNodeID(this.nodeID);
+                reply.setNodeIP(this.nodeIP);
                 reply.setAcknowledged(true);
+
                 acquireLock();
 
                 return reply;
             }
+
+            /**
+             *  case 2: Receiver already has access to the resource: DENY and reply
+             */
+
+            if (CS_BUSY) {
+                Message reply = new Message();
+                reply.setClock(this.counter);
+                reply.setNodeID(this.nodeID);
+                reply.setNodeIP(this.nodeIP);
+                reply.setAcknowledged(false);
+
+                return reply;
+            }
+
+            /**
+             *  case 3: Receiver wants to access resource but is yet to (compare own multicast message to received message
+             *  the message with lower timestamp wins) - GRANT if received is lower, acquirelock and reply
+             */
+
+            if (WANTS_TO_ENTER_CS) {
+                Message reply = new Message();
+                reply.setClock(this.counter);
+                reply.setNodeID(this.nodeID);
+                reply.setNodeIP(this.nodeIP);
+
+                if (reply.getClock() < message.getClock()) {
+                    reply.setAcknowledged(false);
+
+                    return reply;
+                } else {
+                    reply.setAcknowledged(true);
+                    acquireLock();
+
+                    return reply;
+                }
+            }
+
+            return null;
         }
 
-        return null;
+        @Override
+        public boolean majorityAcknowledged () throws RemoteException {
+
+            // count the number of yes (i.e. where message.isAcknowledged = true)
+            // check if it is the majority or not
+            // return the decision (true or false)
+
+
+            quorum = this.activenodesforfile.size() / 2 + 1;
+            return queueACK.stream().filter(m -> m.isAcknowledged()).count() >= quorum;
+        }
+
+        @Override
+        public void setActiveNodesForFile (Set<Message> messages) throws RemoteException {
+
+            activenodesforfile = messages;
+
+        }
+
+        @Override
+        public void onReceivedVotersDecision (Message message) throws RemoteException {
+
+            // release CS lock if voter initiator says he was denied access bcos he lacks majority votes
+            // otherwise lock is kept
+
+            if (!message.isAcknowledged()) {
+                releaseLocks();
+            }
+
+        }
+
+        @Override
+        public void onReceivedUpdateOperation (Message message) throws RemoteException {
+
+            // check the operation type: we expect a WRITE operation to do this.
+            if (message.getOptype() == OperationType.WRITE) {
+                // perform operation by using the Operations class
+                Operations operation = new Operations(this, message, activenodesforfile);
+                operation.performOperation();
+
+                // Release locks after this operation
+                releaseLocks();
+            }
+            else if (message.getOptype() == OperationType.READ) {
+                releaseLocks();
+            }
+
+        }
+
+        @Override
+        public void multicastUpdateOrReadReleaseLockOperation (Message message) throws RemoteException {
+
+            ArrayList<Message> replicas = new ArrayList<>(activenodesforfile);
+
+            // check the operation type:
+            // if this is a write operation, multicast the update to the rest of the replicas (voters)
+            Operations op = new Operations(this, message, activenodesforfile);
+            if (message.getOptype() == OperationType.WRITE) {
+                op.multicastOperationToReplicas(message);
+            }
+            else {
+                op.multicastReadReleaseLocks();
+            }
+        }
+
+        @Override
+        public void multicastVotersDecision (Message message) throws RemoteException {
+
+            // multicast voters decision to the rest of the replicas (i.e activenodesforfile)
+            ArrayList<Message> replicas = new ArrayList<>(activenodesforfile);
+
+            for (Message activenodes : replicas) {
+                String nodeip = activenodes.getNodeIP();
+                String nodeid = activenodes.getNodeID().toString();
+                try {
+                    Registry registry = Util.locateRegistry(nodeip);		// locate the registry and see if the node is still active
+                    ChordNodeInterface node = (ChordNodeInterface) registry.lookup(nodeid);
+
+                    node.onReceivedVotersDecision(message);
+                } catch (NotBoundException e) {
+                    //e.printStackTrace();
+                }
+            }
+
+
+        }
+
     }
-
-    @Override
-    public boolean majorityAcknowledged() throws RemoteException {
-
-        // count the number of yes (i.e. where message.isAcknowledged = true)
-        // check if it is the majority or not
-        // return the decision (true or false)
-
-
-        return false;            // change this to the result of the vote
-    }
-
-    @Override
-    public void setActiveNodesForFile(Set<Message> messages) throws RemoteException {
-
-        activenodesforfile = messages;
-
-    }
-
-    @Override
-    public void onReceivedVotersDecision(Message message) throws RemoteException {
-
-        // release CS lock if voter initiator says he was denied access bcos he lacks majority votes
-        // otherwise lock is kept
-
-    }
-
-    @Override
-    public void onReceivedUpdateOperation(Message message) throws RemoteException {
-
-        // check the operation type: we expect a WRITE operation to do this.
-        // perform operation by using the Operations class
-        // Release locks after this operation
-
-    }
-
-    @Override
-    public void multicastUpdateOrReadReleaseLockOperation(Message message) throws RemoteException {
-
-        // check the operation type:
-        // if this is a write operation, multicast the update to the rest of the replicas (voters)
-        // otherwise if this is a READ operation multicast releaselocks to the replicas (voters)
-    }
-
-    @Override
-    public void multicastVotersDecision(Message message) throws RemoteException {
-
-        // multicast voters decision to the rest of the replicas (i.e activenodesforfile)
-
-
-    }
-
-}
