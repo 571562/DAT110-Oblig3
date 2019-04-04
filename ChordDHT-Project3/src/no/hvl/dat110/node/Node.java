@@ -337,10 +337,11 @@ public class Node extends UnicastRemoteObject implements ChordNodeInterface {
             // do something with the acknowledgement you received from the voters - Idea: use the queueACK to collect GRANT/DENY messages and make sure queueACK is synchronized!!!
 
             // compute election result - Idea call majorityAcknowledged()
-            boolean result = majorityAcknowledged();
 
-            return result;  // change to the election result
         }
+            boolean result = majorityAcknowledged();
+            return result;  // change to the election result
+    }
 
         @Override
         public Message onMessageReceived (Message message) throws RemoteException {
@@ -419,7 +420,7 @@ public class Node extends UnicastRemoteObject implements ChordNodeInterface {
         }
 
         @Override
-        public void setActiveNodesForFile (Set<Message> messages) throws RemoteException {
+        public void setActiveNodesForFile (Set < Message > messages) throws RemoteException {
 
             activenodesforfile = messages;
 
@@ -448,8 +449,7 @@ public class Node extends UnicastRemoteObject implements ChordNodeInterface {
 
                 // Release locks after this operation
                 releaseLocks();
-            }
-            else if (message.getOptype() == OperationType.READ) {
+            } else if (message.getOptype() == OperationType.READ) {
                 releaseLocks();
             }
 
@@ -465,8 +465,7 @@ public class Node extends UnicastRemoteObject implements ChordNodeInterface {
             Operations op = new Operations(this, message, activenodesforfile);
             if (message.getOptype() == OperationType.WRITE) {
                 op.multicastOperationToReplicas(message);
-            }
-            else {
+            } else {
                 op.multicastReadReleaseLocks();
             }
         }
@@ -481,7 +480,7 @@ public class Node extends UnicastRemoteObject implements ChordNodeInterface {
                 String nodeip = activenodes.getNodeIP();
                 String nodeid = activenodes.getNodeID().toString();
                 try {
-                    Registry registry = Util.locateRegistry(nodeip);		// locate the registry and see if the node is still active
+                    Registry registry = Util.locateRegistry(nodeip);        // locate the registry and see if the node is still active
                     ChordNodeInterface node = (ChordNodeInterface) registry.lookup(nodeid);
 
                     node.onReceivedVotersDecision(message);
@@ -493,4 +492,5 @@ public class Node extends UnicastRemoteObject implements ChordNodeInterface {
 
         }
 
-    }
+
+}
